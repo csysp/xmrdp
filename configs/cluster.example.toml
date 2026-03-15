@@ -1,0 +1,74 @@
+# XMRDP Cluster Configuration
+# Copy this to cluster.toml and edit for your setup.
+# Or run: xmrdp setup
+
+[cluster]
+name = "my-cluster"
+# Your Monero wallet address (public only — no private keys needed)
+wallet = "4..."
+
+# ─── Master Node ──────────────────────────────────────────────
+[master]
+# IP or hostname reachable by all workers
+host = "192.168.1.100"
+# C2 API port for worker coordination
+api_port = 7099
+# Auth token — leave empty, auto-generated on first setup
+api_token = ""
+
+[master.monerod]
+# Prune blockchain to save disk space (~50GB vs ~200GB)
+prune = true
+# Extra CLI args passed directly to monerod
+extra_args = []
+
+[master.p2pool]
+# Use P2Pool mini sidechain (recommended for < 100 KH/s)
+mini = true
+# Extra CLI args passed directly to p2pool
+extra_args = []
+
+[master.xmrig]
+# CPU threads for master node mining (0 = auto-detect all cores)
+threads = 0
+
+# ─── Worker Nodes ─────────────────────────────────────────────
+# Add as many [[workers]] sections as you have machines.
+# Each worker only needs: name, host.
+
+[[workers]]
+name = "worker-1"
+host = "192.168.1.101"
+
+[[workers]]
+name = "worker-2"
+host = "192.168.1.102"
+
+[[workers]]
+name = "worker-3"
+host = "192.168.1.103"
+
+[[workers]]
+name = "worker-4"
+host = "192.168.1.104"
+
+[[workers]]
+name = "worker-5"
+host = "192.168.1.105"
+
+[[workers]]
+name = "worker-6"
+host = "192.168.1.106"
+
+# ─── Binary Versions ─────────────────────────────────────────
+[binaries]
+# "latest" fetches the newest release from GitHub.
+# Pin to a specific tag (e.g. "v0.18.3.4") for reproducibility.
+monero_version = "latest"
+p2pool_version = "latest"
+xmrig_version = "latest"
+
+# ─── Security ─────────────────────────────────────────────────
+[security]
+# Verify SHA256 checksums of downloaded binaries
+verify_checksums = true
