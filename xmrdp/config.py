@@ -91,6 +91,18 @@ def _apply_defaults(config):
             f"Invalid master.host value: {host!r}. "
             "Use an IPv4 address, bracketed IPv6, or a valid hostname."
         )
+
+    # bind_host controls what address the C2 server listens on.
+    # Defaults to master.host so single-interface setups need no extra config.
+    # Set to 0.0.0.0 to listen on all interfaces (e.g. multi-homed master).
+    config["master"].setdefault("bind_host", config["master"]["host"])
+    bind_host = config["master"]["bind_host"]
+    if not _HOST_RE.match(str(bind_host)):
+        raise ValueError(
+            f"Invalid master.bind_host value: {bind_host!r}. "
+            "Use an IPv4 address, bracketed IPv6, a valid hostname, or 0.0.0.0."
+        )
+
     config["master"].setdefault("api_port", PORTS["c2_api"])
     config["master"].setdefault("api_token", "")
 
@@ -179,6 +191,7 @@ def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
         '',
         '[master]',
         f'host = "{_toml_str(master_host)}"',
+        '# bind_host = "0.0.0.0"  # Optional: override C2 listen address (default = host)',
         f'api_port = {PORTS["c2_api"]}',
         'api_token = ""  # Auto-generated on first setup',
         '',

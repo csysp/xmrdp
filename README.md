@@ -176,6 +176,7 @@ Prints platform-specific rules (ufw, iptables, netsh, pf). Rules are never appli
 | In-band TLS fingerprint check | Worker verifies the C2 server's cert fingerprint against the live connection — no TOCTOU race between probe and request |
 | Firewall rules are print-only | The operator must consciously review and apply firewall changes |
 | cluster.toml mode 0600 | API tokens and xmrig HTTP token are not readable by other OS users |
+| `master.host` vs `master.bind_host` | `host` is the address workers use to reach the master; `bind_host` controls what interface the C2 server listens on (defaults to `host`). Set `bind_host = "0.0.0.0"` on a multi-homed master to accept connections on all interfaces while keeping `host` set to the LAN IP that workers should connect to. |
 
 ---
 
@@ -213,13 +214,19 @@ Workers are marked stale after 3 missed heartbeats (180 seconds) and evicted fro
 ## Security Model
 
 - No private keys anywhere — only the public wallet address is stored
-- SHA256 checksum verification for every binary downloaded from GitHub
+- SHA256 checksum verification for every binary downloaded from GitHub (see note below)
 - API authentication via pre-shared Bearer token (64-char hex, constant-time comparison)
 - C2 server is a telemetry bus only — it stores and reports hashrate/uptime data; it cannot push config or execute commands on workers
 - Optional TLS on the C2 connection with in-band certificate fingerprint pinning
 - Config changes are pushed to workers explicitly via `xmrdp sync` over SSH — workers do not pull from master at runtime
 - Firewall rule generation per role; rules are never applied automatically
 - No external telemetry — the tool only contacts the GitHub API (for releases) and the Monero/P2Pool p2p networks
+
+### Known limitations
+
+**Binary verification (SHA256, not GPG):** XMRDP verifies every downloaded binary against the SHA256 checksum published in the same GitHub release. It does not perform GPG signature verification. The trust anchor is the GitHub release page itself, served over HTTPS. For additional assurance, manually verify GPG signatures using the keys published by the [Monero project](https://www.getmonero.org/downloads/), [P2Pool](https://github.com/SChernykh/p2pool/releases), and [XMRig](https://github.com/xmrig/xmrig/releases) before running `xmrdp setup`.
+
+**Wallet address visible in process list:** P2Pool requires the wallet address as a command-line argument (`--wallet`). This means it will appear in `ps aux` / Task Manager output on any machine running the master node. The wallet address is a public receive address — not a private key — so this does not expose funds. However, operators who want to keep their wallet address private should be aware of this limitation.
 
 ---
 

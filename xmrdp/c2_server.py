@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import ssl
+import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -50,6 +51,49 @@ _WORKER_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
 
 # Rate limiting dict max size (NF-NEW-04): bound memory against IP spoofing
 _RATE_LIMIT_MAX_IPS = 10_000
+
+
+# ---------------------------------------------------------------------------
+# Worker registry persistence
+# ---------------------------------------------------------------------------
+
+def _workers_file() -> Path:
+    return get_data_dir() / "workers.json"
+
+
+def _load_workers() -> dict:
+    """Load persisted worker registry from disk. Returns {} on any error."""
+    try:
+        path = _workers_file()
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        log.warning("Could not load persisted workers: %s", exc)
+    return {}
+
+
+def _save_workers() -> None:
+    """Write current _workers dict to disk. Must be called under _workers_lock."""
+    try:
+        path = _workers_file()
+        content = json.dumps(_workers, indent=2)
+        if sys.platform != "win32":
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+        else:
+            path.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        log.warning("Failed to persist workers: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +270,7 @@ class C2Handler(BaseHTTPRequestHandler):
                 "cpu_usage": 0.0,
                 "registered_ip": registered_ip,
             }
+            _save_workers()
 
         log.info("Worker registered: %s (cpus=%s, ram=%s MB)", name, cpus, ram)
         self._audit("worker_registered", name=name, platform=platform, cpus=cpus)
@@ -271,6 +316,7 @@ class C2Handler(BaseHTTPRequestHandler):
             _workers[name]["hashrate"] = body.get("hashrate", 0.0)
             _workers[name]["uptime"] = body.get("uptime", 0)
             _workers[name]["cpu_usage"] = body.get("cpu_usage", 0.0)
+            _save_workers()
 
         self._audit("heartbeat", name=name)
         self._send_json({"status": "ok"})
@@ -306,10 +352,13 @@ class C2Handler(BaseHTTPRequestHandler):
 
         # Lazy eviction of workers unseen for more than 24 hours (Fix 5)
         with _workers_lock:
-            for w_name in [w["name"] for w in workers_snapshot
-                           if (now - w.get("last_seen", 0)) > _WORKER_EVICTION_AGE]:
+            evicted = [w["name"] for w in workers_snapshot
+                       if (now - w.get("last_seen", 0)) > _WORKER_EVICTION_AGE]
+            for w_name in evicted:
                 _workers.pop(w_name, None)
                 log.info("Evicted stale worker: %s", w_name)
+            if evicted:
+                _save_workers()
 
         cluster_name = _config.get("cluster", {}).get("name", "xmrdp-cluster")
 
@@ -383,12 +432,15 @@ def start_c2_server(config: dict) -> HTTPServer:
     global _config, _workers, _server_start_time, _running_server, _auth_failures
 
     _config = config
-    _workers = {}
+    _workers = _load_workers()
     _auth_failures = {}
     _server_start_time = time.time()
 
-    host = config.get("master", {}).get("host", "127.0.0.1")
-    port = config.get("master", {}).get("api_port", 7099)
+    master_cfg = config.get("master", {})
+    # bind_host controls what interface the C2 server listens on.
+    # Falls back to master.host so existing configs continue to work.
+    host = master_cfg.get("bind_host") or master_cfg.get("host", "127.0.0.1")
+    port = master_cfg.get("api_port", 7099)
 
     server = HTTPServer((host, port), C2Handler)
 
