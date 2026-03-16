@@ -1,6 +1,6 @@
-# XMRDP — Monero Mining Cluster Rapid Deployment Tool
+# <p align="center"> xmrdp </p>
 
-> Deploy a Monero mining cluster on P2Pool mini in minutes. No private keys on any node. Payouts go directly to your wallet via P2Pool coinbase transactions.
+Deploy a Monero mining cluster on P2Pool mini in minutes. No private keys on any node. Payouts go directly to your wallet via P2Pool coinbase transactions.
 
 ## Quick Start
 
