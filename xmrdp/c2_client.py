@@ -357,7 +357,7 @@ def _read_local_xmrig_stats() -> dict:
         headers = {}
         if _xmrig_http_token:
             headers["Authorization"] = f"Bearer {_xmrig_http_token}"
-        req = Request("http://127.0.0.1:8080/1/summary", headers=headers, method="GET")
+        req = Request("http://127.0.0.1:8080/1/summary", headers=headers, method="GET")  # nosec B310 — hardcoded loopback only
         with urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             # xmrig summary has hashrate.total[] with 10s, 60s, 15m averages.

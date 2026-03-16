@@ -65,7 +65,7 @@ def _wait_for_rpc(host, port, timeout=None, interval=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            resp = urlopen(url, timeout=HEALTH_CHECK_TIMEOUT)
+            resp = urlopen(url, timeout=HEALTH_CHECK_TIMEOUT)  # nosec B310 — URL is 127.0.0.1 health check; scheme is always http on loopback
             if resp.status == 200:
                 return True
         except (URLError, OSError, ValueError):

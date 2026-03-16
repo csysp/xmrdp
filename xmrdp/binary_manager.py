@@ -66,7 +66,7 @@ def _request(url, accept="application/json"):
         }
     req = Request(url, headers=headers)
     try:
-        return urlopen(req, timeout=30)
+        return urlopen(req, timeout=30)  # nosec B310 — URLs are GitHub HTTPS only; scheme validated by caller
     except HTTPError as exc:
         if exc.code == 403:
             remaining = exc.headers.get("X-RateLimit-Remaining", "")
@@ -367,7 +367,7 @@ def extract_binary(archive_path, software, dest_dir):
                             f"Zip Slip detected in tar: {member.name!r} would "
                             "escape extraction directory"
                         )
-                tf.extractall(tmp_dir)
+                tf.extractall(tmp_dir)  # nosec B202 — all members validated by relative_to() above
 
         if name_lower.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zf:
@@ -379,7 +379,7 @@ def extract_binary(archive_path, software, dest_dir):
                         raise RuntimeError(
                             f"Zip Slip detected: {member!r} would escape extraction directory"
                         )
-                zf.extractall(tmp_dir)
+                zf.extractall(tmp_dir)  # nosec B202 — all members validated by relative_to() above
         elif name_lower.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tf:
                 _safe_tar_extract(tf)

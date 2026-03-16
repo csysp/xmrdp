@@ -40,7 +40,7 @@ def generate_monerod_args(config):
         "--data-dir", str(data_dir / "monerod"),
         "--log-file", str(log_dir / "monerod.log"),
         "--zmq-pub", f"tcp://127.0.0.1:{PORTS['monerod_zmq']}",
-        "--rpc-bind-ip", "0.0.0.0",
+        "--rpc-bind-ip", "0.0.0.0",  # nosec B104 — intentional; monerod RPC must be reachable by workers; --restricted-rpc limits exposure
         "--rpc-bind-port", str(PORTS["monerod_rpc"]),
         "--confirm-external-bind",
         "--restricted-rpc",
