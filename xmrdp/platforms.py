@@ -50,6 +50,11 @@ def get_data_dir():
             data_dir = Path.home() / ".xmrdp"
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    if system != "windows":
+        try:
+            data_dir.chmod(0o700)
+        except OSError:
+            pass
     return data_dir
 
 
@@ -73,6 +78,11 @@ def get_config_dir():
             config_dir = Path.home() / ".xmrdp" / "config"
 
     config_dir.mkdir(parents=True, exist_ok=True)
+    if system != "windows":
+        try:
+            config_dir.chmod(0o700)
+        except OSError:
+            pass
     return config_dir
 
 
@@ -88,6 +98,11 @@ def get_pid_dir():
     """Return the directory for PID files."""
     pid_dir = get_data_dir() / "pids"
     pid_dir.mkdir(parents=True, exist_ok=True)
+    if platform.system().lower() != "windows":
+        try:
+            pid_dir.chmod(0o700)
+        except OSError:
+            pass
     return pid_dir
 
 
@@ -95,6 +110,11 @@ def get_log_dir():
     """Return the directory for log files."""
     log_dir = get_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    if platform.system().lower() != "windows":
+        try:
+            log_dir.chmod(0o700)
+        except OSError:
+            pass
     return log_dir
 
 
@@ -102,4 +122,9 @@ def get_binary_dir():
     """Return the directory for cached binaries."""
     bin_dir = get_data_dir() / "binaries"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    if platform.system().lower() != "windows":
+        try:
+            bin_dir.chmod(0o700)
+        except OSError:
+            pass
     return bin_dir

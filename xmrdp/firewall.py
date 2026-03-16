@@ -69,17 +69,31 @@ def _master_rules(config):
         },
         {
             "direction": "in",
-            "port": PORTS["p2pool_stratum"],
-            "proto": "tcp",
-            "description": "p2pool stratum (miners connect here)",
-        },
-        {
-            "direction": "in",
             "port": PORTS["p2pool_p2p"],
             "proto": "tcp",
             "description": "p2pool P2P (sidechain sync)",
         },
     ]
+
+    # Stratum port — restrict to worker IPs when known, otherwise LAN.
+    # Leaving stratum open to the world allows anyone to drain pool shares.
+    if worker_ips:
+        for ip in worker_ips:
+            rules.append({
+                "direction": "in",
+                "port": PORTS["p2pool_stratum"],
+                "proto": "tcp",
+                "source": ip,
+                "description": f"p2pool stratum (worker {ip})",
+            })
+    else:
+        rules.append({
+            "direction": "in",
+            "port": PORTS["p2pool_stratum"],
+            "proto": "tcp",
+            "source": "192.168.0.0/16",
+            "description": "p2pool stratum (LAN only)",
+        })
 
     # C2 API — restrict to worker IPs when known, otherwise LAN.
     if worker_ips:

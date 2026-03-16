@@ -75,6 +75,10 @@ CHECKSUM_PATTERNS = {
 # Default config file name
 CONFIG_FILENAME = "cluster.toml"
 
+# TLS certificate filenames (stored in config directory)
+C2_TLS_CERT_FILE = "c2_server.crt"
+C2_TLS_KEY_FILE = "c2_server.key"
+
 # Heartbeat interval for workers (seconds)
 HEARTBEAT_INTERVAL = 60
 

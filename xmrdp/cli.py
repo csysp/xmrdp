@@ -1,6 +1,7 @@
 """CLI entry point for XMRDP."""
 
 import argparse
+import logging
 import sys
 
 from xmrdp import __version__
@@ -15,6 +16,12 @@ def _build_parser():
         "-V", "--version",
         action="version",
         version=f"xmrdp {__version__}",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable verbose logging output (DEBUG level).",
     )
     parser.add_argument(
         "-c", "--config",
@@ -74,6 +81,34 @@ def _build_parser():
         help="Role to generate rules for",
     )
 
+    # sync
+    sp_sync = sub.add_parser(
+        "sync",
+        help="Push cluster.toml to worker nodes via SSH/SCP",
+    )
+    sp_sync.add_argument(
+        "--worker",
+        metavar="NAME",
+        nargs="+",
+        help="Sync only the named worker(s) (default: all workers in config)",
+    )
+    sp_sync.add_argument(
+        "--ssh-user",
+        metavar="USER",
+        default="",
+        help="SSH username (default: current user)",
+    )
+    sp_sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be synced without making any changes",
+    )
+    sp_sync.add_argument(
+        "--restart",
+        action="store_true",
+        help="Restart xmrig on each worker after syncing config",
+    )
+
     # config
     sp_cfg = sub.add_parser("config", help="Manage cluster configuration")
     sp_cfg.add_argument(
@@ -95,6 +130,13 @@ def _build_parser():
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    log_level = logging.DEBUG if args.verbose else logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     if args.command is None:
         parser.print_help()
@@ -118,6 +160,9 @@ def main(argv=None):
     elif args.command == "logs":
         from xmrdp.node_manager import cmd_logs
         cmd_logs(args)
+    elif args.command == "sync":
+        from xmrdp.sync import cmd_sync
+        cmd_sync(args)
     elif args.command == "firewall":
         from xmrdp.firewall import cmd_firewall
         cmd_firewall(args)
@@ -145,10 +190,26 @@ def _handle_config(args):
             sys.exit(1)
     elif args.show:
         from xmrdp.config import load_config
+        import copy
         import json
+        _SENSITIVE_KEYS = frozenset({"api_token", "token", "secret", "password", "key"})
+
+        def _redact(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k.lower() in _SENSITIVE_KEYS:
+                        obj[k] = "[REDACTED]"
+                    else:
+                        _redact(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _redact(item)
+
         try:
             config = load_config(args.config)
-            print(json.dumps(config, indent=2))
+            safe = copy.deepcopy(config)
+            _redact(safe)
+            print(json.dumps(safe, indent=2))
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)

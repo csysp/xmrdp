@@ -7,6 +7,7 @@ process control and c2_server/c2_client for coordination.
 
 import logging
 import sys
+import time
 
 from xmrdp.config import load_config
 from xmrdp.constants import PORTS
@@ -105,7 +106,12 @@ def cluster_status(config: dict) -> dict:
     # Try remote cluster status from C2 first.
     if token:
         try:
-            from xmrdp.c2_client import get_cluster_status
+            from xmrdp.c2_client import get_cluster_status, configure_tls
+            tls_cfg = config.get("security", {})
+            configure_tls(
+                enabled=tls_cfg.get("tls_enabled", False),
+                fingerprint=tls_cfg.get("c2_tls_fingerprint", ""),
+            )
             return get_cluster_status(host, port, token)
         except Exception as exc:
             log.debug("C2 unreachable, falling back to local checks: %s", exc)
@@ -186,13 +192,30 @@ def deploy_master(config: dict) -> None:
 def deploy_worker(config: dict) -> None:
     """Start a worker node, registering with the master.
 
-    Pre-checks: master reachability, config fetch.
-
-    Startup order: register -> fetch config -> start xmrig -> heartbeat loop.
+    Startup order: register -> start xmrig -> heartbeat loop.
     """
     import threading
     from xmrdp.node_manager import start_worker
-    from xmrdp.c2_client import register, fetch_config, run_heartbeat_loop
+    from xmrdp.c2_client import register, run_heartbeat_loop, configure_tls, configure_xmrig_token
+
+    # Configure TLS before any C2 calls.
+    tls_cfg = config.get("security", {})
+    tls_enabled = tls_cfg.get("tls_enabled", False)
+    if not tls_enabled:
+        print(
+            "WARNING: TLS is disabled. All C2 traffic (including the API token) "
+            "will be sent in plaintext.\n"
+            "         Re-run 'xmrdp setup' on the master to generate a certificate, "
+            "then copy c2_tls_fingerprint into this worker's cluster.toml and set "
+            "tls_enabled = true.",
+            file=sys.stderr,
+        )
+    configure_tls(
+        enabled=tls_enabled,
+        fingerprint=tls_cfg.get("c2_tls_fingerprint", ""),
+    )
+    xmrig_http_token = config.get("master", {}).get("xmrig", {}).get("http_token", "")
+    configure_xmrig_token(xmrig_http_token)
     from xmrdp.constants import HEARTBEAT_INTERVAL
 
     master_cfg = config.get("master", {})
@@ -226,20 +249,25 @@ def deploy_worker(config: dict) -> None:
               file=sys.stderr)
         print("Starting xmrig with local config only.")
 
-    # Fetch worker config from master.
-    try:
-        remote_config = fetch_config(host, port, token, worker_name)
-        log.info("Fetched worker config from master")
-    except Exception as exc:
-        log.warning("Could not fetch config from master: %s", exc)
-        remote_config = None
-
-    # Start xmrig via node_manager.
+    # Start xmrig via node_manager using local config.
     try:
         start_worker(config)
         print(f"Worker '{worker_name}' started.")
     except Exception as exc:
         print(f"Error starting worker: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Give xmrig a moment to start and check it didn't immediately crash.
+    time.sleep(1.5)
+    from xmrdp.node_manager import get_process
+    _startup_proc = get_process("xmrig")
+    if _startup_proc is None:
+        print(
+            f"Error: xmrig exited immediately after launch. "
+            f"Check logs for details. "
+            f"(Run with -v for verbose output.)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Start heartbeat loop in a daemon thread.
@@ -251,6 +279,17 @@ def deploy_worker(config: dict) -> None:
     )
     hb_thread.start()
     log.info("Heartbeat loop started (interval=%ds)", heartbeat_interval)
+
+    # Keep the process alive while xmrig is running so the daemon heartbeat
+    # thread is not killed when the main thread returns.
+    from xmrdp.node_manager import get_process
+    xmrig_proc = get_process("xmrig")
+    if xmrig_proc is not None:
+        try:
+            xmrig_proc.wait()
+        except KeyboardInterrupt:
+            from xmrdp.node_manager import stop_service
+            stop_service("xmrig")
 
 
 # ---------------------------------------------------------------------------
@@ -308,4 +347,11 @@ def _print_status_table(status: dict) -> None:
     total = status.get("total_workers", 0)
     online = status.get("online_workers", 0)
     print(f"\n  Workers: {online}/{total} online")
+
+    pool = status.get("pool", {})
+    if pool:
+        print()
+        print(f"  P2Pool hashrate: {pool.get('pool_hashrate', 0):.0f} H/s")
+        print(f"  P2Pool miners:   {pool.get('pool_miners', 0)}")
+        print(f"  Blocks found:    {pool.get('pool_blocks_found', 0)}")
     print()

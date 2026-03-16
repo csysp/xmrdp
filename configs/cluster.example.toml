@@ -72,3 +72,13 @@ xmrig_version = "latest"
 [security]
 # Verify SHA256 checksums of downloaded binaries
 verify_checksums = true
+
+# Optional TLS for the C2 API connection between workers and master.
+# Run 'xmrdp setup' to generate a self-signed certificate automatically.
+# When tls_enabled = true, all three fields below must be set.
+tls_enabled = false
+c2_tls_cert = ""   # Path to the PEM certificate file (e.g. "c2_server.crt")
+c2_tls_key  = ""   # Path to the PEM private key file (e.g. "c2_server.key")
+# SHA-256 fingerprint of the cert — workers pin this to prevent MITM.
+# Computed automatically by 'xmrdp setup'. Format: aa:bb:cc:...
+c2_tls_fingerprint = ""

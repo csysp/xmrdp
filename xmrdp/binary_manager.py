@@ -34,6 +34,16 @@ from xmrdp.platforms import detect_platform, get_binary_dir, make_executable
 _USER_AGENT = "xmrdp-binary-manager/1.0"
 _CHUNK_SIZE = 8192  # 8 KB read chunks
 _VERSIONS_FILE = ".versions.json"
+_MAX_DOWNLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB — larger than any legitimate release
+
+
+def _github_headers() -> dict:
+    """Return headers for GitHub API requests, including auth if GITHUB_TOKEN is set."""
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _request(url, accept="application/json"):
@@ -42,10 +52,18 @@ def _request(url, accept="application/json"):
     Raises ``RuntimeError`` on rate-limiting (HTTP 403 with rate-limit
     headers) so the caller can surface a clear message.
     """
-    headers = {
-        "User-Agent": _USER_AGENT,
-        "Accept": accept,
-    }
+    parsed_host = url.split("/")[2] if "/" in url else ""
+    is_github_api = parsed_host == "api.github.com"
+
+    if is_github_api:
+        headers = _github_headers()
+        headers["User-Agent"] = _USER_AGENT
+        headers["Accept"] = accept
+    else:
+        headers = {
+            "User-Agent": _USER_AGENT,
+            "Accept": accept,
+        }
     req = Request(url, headers=headers)
     try:
         return urlopen(req, timeout=30)
@@ -179,7 +197,19 @@ def download_binary(url, dest_path, expected_size=None):
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     resp = _request(url, accept="application/octet-stream")
-    total = expected_size or int(resp.headers.get("Content-Length", 0))
+
+    # Check Content-Length upfront if present to catch oversized responses early.
+    try:
+        content_length = int(resp.headers.get("Content-Length", 0) or 0)
+    except (ValueError, TypeError):
+        content_length = 0
+    if content_length > _MAX_DOWNLOAD_SIZE:
+        raise RuntimeError(
+            f"Response Content-Length {content_length} exceeds maximum "
+            f"allowed download size {_MAX_DOWNLOAD_SIZE}"
+        )
+
+    total = expected_size or content_length
     total_mb = total / (1024 * 1024) if total else 0.0
 
     downloaded = 0
@@ -190,8 +220,14 @@ def download_binary(url, dest_path, expected_size=None):
                 chunk = resp.read(_CHUNK_SIZE)
                 if not chunk:
                     break
-                fh.write(chunk)
                 downloaded += len(chunk)
+                if downloaded > _MAX_DOWNLOAD_SIZE:
+                    Path(tmp_path).unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"Download of {url!r} exceeded {_MAX_DOWNLOAD_SIZE} bytes — "
+                        "aborting to prevent disk exhaustion."
+                    )
+                fh.write(chunk)
                 done_mb = downloaded / (1024 * 1024)
                 if total:
                     sys.stdout.write(
@@ -314,23 +350,45 @@ def extract_binary(archive_path, software, dest_dir):
 
         # --- Extract the archive ---
         name_lower = archive_path.name.lower()
-        # Python 3.12+ requires filter= for tarfile.extractall (PEP 706).
-        _tar_extract_kw = {}
-        if sys.version_info >= (3, 12):
-            _tar_extract_kw["filter"] = "data"
+        tmp_dir_resolved = tmp_dir.resolve()
+
+        def _safe_tar_extract(tf):
+            """Extract a tarfile with Zip Slip protection on all Python versions."""
+            if sys.version_info >= (3, 12):
+                tf.extractall(tmp_dir, filter="data")
+            else:
+                # Manual member-path validation for Python < 3.12 (F-06).
+                for member in tf.getmembers():
+                    member_path = (tmp_dir / member.name).resolve()
+                    try:
+                        member_path.relative_to(tmp_dir_resolved)
+                    except ValueError:
+                        raise RuntimeError(
+                            f"Zip Slip detected in tar: {member.name!r} would "
+                            "escape extraction directory"
+                        )
+                tf.extractall(tmp_dir)
 
         if name_lower.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zf:
+                for member in zf.namelist():
+                    member_path = (tmp_dir / member).resolve()
+                    try:
+                        member_path.relative_to(tmp_dir_resolved)
+                    except ValueError:
+                        raise RuntimeError(
+                            f"Zip Slip detected: {member!r} would escape extraction directory"
+                        )
                 zf.extractall(tmp_dir)
         elif name_lower.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tf:
-                tf.extractall(tmp_dir, **_tar_extract_kw)
+                _safe_tar_extract(tf)
         elif name_lower.endswith((".tar.bz2", ".tbz2")):
             with tarfile.open(archive_path, "r:bz2") as tf:
-                tf.extractall(tmp_dir, **_tar_extract_kw)
+                _safe_tar_extract(tf)
         elif name_lower.endswith(".tar"):
             with tarfile.open(archive_path, "r:") as tf:
-                tf.extractall(tmp_dir, **_tar_extract_kw)
+                _safe_tar_extract(tf)
         else:
             raise ValueError(f"Unsupported archive format: {archive_path.name}")
 
@@ -389,12 +447,13 @@ def ensure_binaries(config, force=False):
     system, machine = detect_platform()
     bin_dir = get_binary_dir()
     versions = _read_versions()
-    configured_versions = config.get("versions", {})
 
     results = {}
 
     for software, repo in GITHUB_REPOS.items():
-        desired_tag = configured_versions.get(software)
+        binaries_cfg = config.get("binaries", {})
+        key_map = {"monero": "monero_version", "p2pool": "p2pool_version", "xmrig": "xmrig_version"}
+        desired_tag = binaries_cfg.get(key_map.get(software, f"{software}_version"))
 
         # Check cache
         cached = versions.get(software, {})
@@ -443,7 +502,8 @@ def ensure_binaries(config, force=False):
             expected_size=asset.get("size"),
         )
 
-        # Checksum verification
+        # Checksum verification — wired to security.verify_checksums (F-08)
+        verify = config.get("security", {}).get("verify_checksums", True)
         checksums = get_release_checksums(assets, software)
         if checksums:
             expected = checksums.get(asset["name"])
@@ -455,10 +515,22 @@ def ensure_binaries(config, force=False):
                         f"Checksum verification failed for {asset['name']}"
                     )
                 print(f"  {software}: checksum OK")
+            elif verify:
+                archive_dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"No checksum entry found for {asset['name']} in release checksums. "
+                    "Set security.verify_checksums = false to skip (not recommended)."
+                )
             else:
-                print(f"  {software}: no matching checksum entry, skipping verify")
+                print(f"  {software}: WARNING: no matching checksum entry, skipping verify")
+        elif verify:
+            archive_dest.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"No checksum file found in {software} release. "
+                "Set security.verify_checksums = false to skip (not recommended)."
+            )
         else:
-            print(f"  {software}: no checksum file in release, skipping verify")
+            print(f"  {software}: WARNING: no checksum file in release, skipping verify")
 
         # Extract
         print(f"  {software}: extracting binary ...")

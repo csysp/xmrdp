@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "xmrdp"
@@ -8,13 +8,42 @@ version = "0.1.0"
 description = "Monero Mining Cluster Rapid Deployment Tool"
 readme = "README.md"
 license = "MIT"
+authors = [
+    { name = "csysp" },
+]
 requires-python = ">=3.8"
+keywords = ["monero", "xmr", "mining", "p2pool", "xmrig", "cluster", "deployment"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
 dependencies = [
     "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/csysp/xmrdp"
+"Bug Tracker" = "https://github.com/csysp/xmrdp/issues"
 
 [project.scripts]
 xmrdp = "xmrdp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["xmrdp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

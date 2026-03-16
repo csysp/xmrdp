@@ -1,11 +1,16 @@
 """Interactive setup wizard for XMRDP cluster configuration."""
 
+import hashlib
+import os
 import secrets
+import shutil
+import ssl
+import subprocess
 import sys
 from pathlib import Path
 
-from xmrdp.config import generate_default_config, validate_wallet
-from xmrdp.constants import CONFIG_FILENAME
+from xmrdp.config import generate_default_config, validate_wallet, _toml_str
+from xmrdp.constants import CONFIG_FILENAME, C2_TLS_CERT_FILE, C2_TLS_KEY_FILE
 from xmrdp.platforms import get_config_dir
 
 
@@ -64,6 +69,25 @@ def run_setup(args):
 
         # --- API token ---
         api_token = secrets.token_hex(32)
+        xmrig_http_token = secrets.token_hex(16)
+
+        # --- TLS certificate (master only) ---
+        config_dir = get_config_dir()
+        tls_enabled = False
+        tls_fingerprint = ""
+        tls_cert_path = config_dir / C2_TLS_CERT_FILE
+        tls_key_path = config_dir / C2_TLS_KEY_FILE
+
+        if role == "master":
+            print()
+            print("Generating TLS certificate for C2 server ...")
+            if _generate_tls_cert(tls_cert_path, tls_key_path):
+                tls_fingerprint = _get_cert_fingerprint(tls_cert_path)
+                tls_enabled = True
+                print(f"  Certificate ready.  Fingerprint: {tls_fingerprint[:16]}...")
+            else:
+                print("  TLS skipped — C2 will use plain HTTP.")
+                print("  Install openssl and re-run 'xmrdp setup' to enable TLS.")
 
         # --- Generate and write config ---
         config_content = generate_default_config(
@@ -72,15 +96,49 @@ def run_setup(args):
             workers=workers,
         )
 
-        # Inject the generated api_token into the config text.
+        # Inject generated secrets into config text.
         config_content = config_content.replace(
             'api_token = ""  # Auto-generated on first setup',
             f'api_token = "{api_token}"',
         )
+        config_content = config_content.replace(
+            'http_token = ""  # Auto-generated on first setup',
+            f'http_token = "{xmrig_http_token}"',
+        )
+        if tls_enabled:
+            config_content = config_content.replace(
+                'tls_enabled = false', 'tls_enabled = true'
+            )
+            config_content = config_content.replace(
+                'c2_tls_cert = ""', f'c2_tls_cert = "{_toml_str(str(tls_cert_path))}"'
+            )
+            config_content = config_content.replace(
+                'c2_tls_key = ""', f'c2_tls_key = "{_toml_str(str(tls_key_path))}"'
+            )
+            config_content = config_content.replace(
+                'c2_tls_fingerprint = ""',
+                f'c2_tls_fingerprint = "{tls_fingerprint}"',
+            )
 
-        config_dir = get_config_dir()
         config_path = config_dir / CONFIG_FILENAME
-        config_path.write_text(config_content, encoding="utf-8")
+        if sys.platform != "win32":
+            # Create with mode 0o600 atomically — no world-readable race window (F-13).
+            fd = os.open(
+                config_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(config_content)
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+        else:
+            config_path.write_text(config_content, encoding="utf-8")
 
         # --- Binaries ---
         skip_binaries = getattr(args, "skip_binaries", False)
@@ -108,6 +166,9 @@ def run_setup(args):
             workers=workers,
             config_path=config_path,
             api_token=api_token,
+            tls_enabled=tls_enabled,
+            tls_fingerprint=tls_fingerprint,
+            xmrig_http_token=xmrig_http_token,
         )
 
     except KeyboardInterrupt:
@@ -138,7 +199,19 @@ def generate_config_cmd(args):
 
     content = generate_default_config()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    if sys.platform != "win32":
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    else:
+        dest.write_text(content, encoding="utf-8")
     print(f"Default config written to: {dest}")
     print("Edit the file and run 'xmrdp setup' to continue.")
 
@@ -146,6 +219,67 @@ def generate_config_cmd(args):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _find_openssl() -> str:
+    """Return path to the openssl binary, or empty string if not found."""
+    # Prefer well-known absolute paths to avoid PATH hijack (Fix 7).
+    if sys.platform != "win32":
+        for trusted in ("/usr/bin/openssl", "/usr/local/bin/openssl", "/opt/homebrew/bin/openssl"):
+            if Path(trusted).is_file():
+                return trusted
+    # Fall back to PATH search (acceptable if none of the above exist).
+    found = shutil.which("openssl")
+    if found:
+        return found
+    # Windows: check common install locations.
+    if sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
+            r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+            r"C:\Program Files (x86)\OpenSSL-Win32\bin\openssl.exe",
+            r"C:\OpenSSL-Win64\bin\openssl.exe",
+        ]
+        for p in candidates:
+            if Path(p).is_file():
+                return p
+    return ""
+
+
+def _generate_tls_cert(cert_path: Path, key_path: Path) -> bool:
+    """Generate a self-signed TLS cert using openssl.  Returns True on success."""
+    openssl = _find_openssl()
+    if not openssl:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                openssl, "req", "-x509",
+                "-newkey", "rsa:2048",
+                "-keyout", str(key_path),
+                "-out", str(cert_path),
+                "-days", "3650",
+                "-nodes",
+                "-subj", "/CN=xmrdp-c2",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return False
+        if sys.platform != "win32":
+            os.chmod(key_path, 0o600)
+            os.chmod(cert_path, 0o600)
+        return True
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _get_cert_fingerprint(cert_path: Path) -> str:
+    """Return the SHA-256 fingerprint (hex) of a PEM certificate file."""
+    cert_pem = cert_path.read_text(encoding="ascii")
+    cert_der = ssl.PEM_cert_to_DER_cert(cert_pem)
+    return hashlib.sha256(cert_der).hexdigest()
+
 
 def _print_banner():
     """Print the welcome banner."""
@@ -202,7 +336,8 @@ def _ask_wallet():
         print("  Please try again.")
 
 
-def _print_summary(wallet, role, master_host, workers, config_path, api_token):
+def _print_summary(wallet, role, master_host, workers, config_path, api_token,
+                   tls_enabled=False, tls_fingerprint="", xmrig_http_token=""):
     """Print a summary of the generated configuration."""
     print()
     print("-" * 56)
@@ -218,6 +353,12 @@ def _print_summary(wallet, role, master_host, workers, config_path, api_token):
         print(f"                   {w['name']} @ {w['host']}")
     print(f"  Config file:   {config_path}")
     print(f"  API token:     {api_token[:8]}...{api_token[-8:]}")
+    print(f"  xmrig HTTP token: {xmrig_http_token[:8]}..." if xmrig_http_token else "  xmrig HTTP token: not set")
+    if tls_enabled:
+        print(f"  C2 TLS:        enabled")
+        print(f"  TLS fingerprint: {tls_fingerprint[:16]}...{tls_fingerprint[-8:]}")
+    else:
+        print(f"  C2 TLS:        disabled (install openssl and re-run setup to enable)")
     print()
     print("Next steps:")
     if role == "master":

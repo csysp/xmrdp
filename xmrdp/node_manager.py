@@ -1,6 +1,5 @@
 """Manage service processes via subprocess with PID-file based lifecycle."""
 
-import json
 import os
 import signal
 import socket
@@ -22,6 +21,10 @@ from xmrdp.platforms import get_data_dir, get_log_dir, get_pid_dir
 
 
 _IS_WINDOWS = sys.platform == "win32"
+
+# Registry of live Popen objects by service name.
+_procs: dict = {}
+_procs_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +86,21 @@ def _read_pid(name):
 
 
 def _write_pid(name, pid):
-    """Write *pid* to the pid file for *name*."""
+    """Write *pid* to the pid file for *name* with mode 0o600 (NF-04)."""
     pid_file = get_pid_dir() / f"{name}.pid"
-    pid_file.write_text(str(pid), encoding="utf-8")
+    if not _IS_WINDOWS:
+        fd = os.open(pid_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(str(pid))
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    else:
+        pid_file.write_text(str(pid), encoding="utf-8")
 
 
 def _remove_pid(name):
@@ -164,6 +179,9 @@ def start_service(name, binary_path, args, env=None):
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
     proc = subprocess.Popen(cmd, **kwargs)
+    log_handle.close()
+    with _procs_lock:
+        _procs[name] = proc
     _write_pid(name, proc.pid)
     return proc.pid
 
@@ -246,6 +264,10 @@ def start_master(config):
     # --- monerod ---
     print("[1/4] Starting monerod ...")
     monerod_bin = get_binary_path("monero")
+    if monerod_bin is None:
+        raise RuntimeError(
+            "monerod binary not found. Run 'xmrdp setup' to download binaries."
+        )
     monerod_args = generate_monerod_args(config)
     pid = start_service("monerod", monerod_bin, monerod_args)
     print(f"       monerod started (PID {pid}). Waiting for RPC ...")
@@ -261,6 +283,10 @@ def start_master(config):
     # --- p2pool ---
     print("[2/4] Starting p2pool ...")
     p2pool_bin = get_binary_path("p2pool")
+    if p2pool_bin is None:
+        raise RuntimeError(
+            "p2pool binary not found. Run 'xmrdp setup' to download binaries."
+        )
     p2pool_args = generate_p2pool_args(config)
     pid = start_service("p2pool", p2pool_bin, p2pool_args)
     print(f"       p2pool started (PID {pid}). Waiting for stratum port ...")
@@ -275,18 +301,13 @@ def start_master(config):
     print("[3/4] Starting xmrig ...")
     config_path = write_xmrig_config(config, role="master")
     xmrig_bin = get_binary_path("xmrig")
+    if xmrig_bin is None:
+        raise RuntimeError(
+            "xmrig binary not found. Run 'xmrdp setup' to download binaries."
+        )
     xmrig_args = ["--config", str(config_path)]
     pid = start_service("xmrig", xmrig_bin, xmrig_args)
     print(f"       xmrig started (PID {pid}).")
-
-    # --- C2 server ---
-    print("[4/4] Starting C2 server ...")
-    try:
-        from xmrdp.c2_server import start_c2_server
-        start_c2_server(config)
-        print("       C2 server started.")
-    except Exception as exc:
-        print(f"       WARNING: Could not start C2 server: {exc}")
 
     print()
     print("Master node is running.")
@@ -296,15 +317,26 @@ def start_master(config):
 def start_worker(config):
     """Start the xmrig process for a worker node.
 
-    This handles only the xmrig subprocess.  C2 registration, config
-    fetching, and heartbeat setup are managed by ``cluster.deploy_worker``.
+    This handles only the xmrig subprocess.  C2 registration and heartbeat
+    setup are managed by ``cluster.deploy_worker``.
+
+    Parameters
+    ----------
+    config : dict
+        The loaded cluster config used to generate the local xmrig config.
     """
     from xmrdp.binary_manager import get_binary_path
     from xmrdp.config_generator import write_xmrig_config
 
     print("[*] Starting xmrig ...")
+
     config_path = write_xmrig_config(config, role="worker")
+
     xmrig_bin = get_binary_path("xmrig")
+    if xmrig_bin is None:
+        raise RuntimeError(
+            "xmrig binary not found. Run 'xmrdp setup' to download binaries."
+        )
     xmrig_args = ["--config", str(config_path)]
     pid = start_service("xmrig", xmrig_bin, xmrig_args)
     print(f"    xmrig started (PID {pid}).")
@@ -387,6 +419,20 @@ def _tail(path, num_lines):
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+def get_process(name):
+    """Return the Popen object for *name* if it is still alive, else None."""
+    with _procs_lock:
+        proc = _procs.get(name)
+    if proc is None:
+        return None
+    if proc.poll() is not None:
+        # Process has exited; clean up the registry entry.
+        with _procs_lock:
+            _procs.pop(name, None)
+        return None
+    return proc
+
 
 def _print_service_status(services):
     """Print a status table for the given service names."""

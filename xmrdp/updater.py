@@ -4,6 +4,7 @@ Checks GitHub releases for newer versions of monerod, p2pool, and xmrig,
 and performs rolling updates with a safe restart strategy.
 """
 
+import copy
 import json
 import sys
 
@@ -238,12 +239,24 @@ def _restart_service(service_name, config):
 
     if service_name == "monerod":
         binary = get_binary_path("monero")
+        if binary is None:
+            raise RuntimeError(
+                "monerod binary not found. Run 'xmrdp setup' to download binaries."
+            )
         args = generate_monerod_args(config)
     elif service_name == "p2pool":
         binary = get_binary_path("p2pool")
+        if binary is None:
+            raise RuntimeError(
+                "p2pool binary not found. Run 'xmrdp setup' to download binaries."
+            )
         args = generate_p2pool_args(config)
     elif service_name == "xmrig":
         binary = get_binary_path("xmrig")
+        if binary is None:
+            raise RuntimeError(
+                "xmrig binary not found. Run 'xmrdp setup' to download binaries."
+            )
         config_path = write_xmrig_config(config, role="master")
         args = ["--config", str(config_path)]
     else:
@@ -256,23 +269,36 @@ def _single_software_config(config, software, tag):
     """Build a config dict that causes ensure_binaries to process only one
     software entry, pinned to *tag*.
 
-    ensure_binaries iterates ``GITHUB_REPOS`` and checks
-    ``config["versions"]`` for per-software tags; we override just the
-    target software and set others to their cached versions so they are
-    skipped (cache hit).
+    ensure_binaries reads version pins from config["binaries"] with keys
+    like "monero_version", "p2pool_version", "xmrig_version".  We build a
+    patched binaries section that pins the target software to *tag* and
+    all others to their cached versions so they are skipped (cache hit).
+
+    Returns a deep copy so that nested dicts (master, workers, security, …)
+    are independent of the caller's config and cannot be mutated downstream.
     """
     from xmrdp.binary_manager import _read_versions
 
-    versions_override = {}
+    key_map = {
+        "monero": "monero_version",
+        "p2pool": "p2pool_version",
+        "xmrig": "xmrig_version",
+    }
     cached = _read_versions()
 
+    # Deep copy so nested dicts are fully independent of the caller's config.
+    patched = copy.deepcopy(config)
+    binaries_override = dict(patched.get("binaries", {}))
+
     for sw in GITHUB_REPOS:
+        key = key_map.get(sw, f"{sw}_version")
         if sw == software:
-            versions_override[sw] = tag
+            binaries_override[key] = tag
         else:
             # Pin to the cached version so ensure_binaries treats it as a
             # cache hit and does not re-download.
             cached_ver = cached.get(sw, {}).get("version", "latest")
-            versions_override[sw] = cached_ver
+            binaries_override[key] = cached_ver
 
-    return {**config, "versions": versions_override}
+    patched["binaries"] = binaries_override
+    return patched

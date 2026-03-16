@@ -1,22 +1,87 @@
 """C2 client for worker nodes.
 
-Handles registration, config fetching, heartbeat reporting, and binary
-downloads from the master's C2 server.  Uses only stdlib urllib -- no
-external dependencies.
+Handles registration, heartbeat reporting, and cluster status queries
+against the master's telemetry bus.  Uses only stdlib -- no external
+dependencies.
 """
 
+import hashlib
+import http.client
 import json
 import logging
 import os
+import ssl
 import time
-from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, quote
+from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from xmrdp.platforms import detect_platform
 
 log = logging.getLogger("xmrdp.c2client")
+
+# ---------------------------------------------------------------------------
+# TLS configuration (set once at startup via configure_tls)
+# ---------------------------------------------------------------------------
+
+_tls_config: dict = {"enabled": False, "fingerprint": ""}
+
+_xmrig_http_token: str = ""
+
+
+def configure_xmrig_token(token: str) -> None:
+    """Configure the xmrig HTTP API token for local stats reading.
+
+    Call once at worker startup with the token from cluster config.
+    """
+    global _xmrig_http_token
+    _xmrig_http_token = token.strip() if token else ""
+
+
+def configure_tls(enabled: bool, fingerprint: str = "") -> None:
+    """Configure TLS for all outgoing C2 connections.
+
+    Call this once before any C2 requests (e.g. in deploy_worker / cluster_status).
+    """
+    global _tls_config
+    _tls_config = {"enabled": bool(enabled), "fingerprint": fingerprint.lower().strip()}
+
+
+def _verify_peer_fingerprint(conn: "http.client.HTTPSConnection", host: str, port: int) -> None:
+    """Verify the fingerprint of the peer cert from the live TLS connection.
+
+    Reads the DER-encoded certificate directly from the established SSL socket
+    (in-band), so there is no TOCTOU race between a probe connection and the
+    real request connection.  Verification runs on every connection — no
+    caching — so a cert swap after the first connection is always detected
+    (NF-NEW-05).
+    """
+    expected = _tls_config["fingerprint"]
+    if not expected:
+        # No fingerprint configured; accept any valid TLS cert.
+        return
+
+    # getpeercert(binary_form=True) returns DER cert from the live connection — no TOCTOU
+    sock = conn.sock
+    if sock is None:
+        raise ConnectionError("TLS connection has no socket — cannot verify fingerprint")
+
+    # HTTPSConnection.sock is an ssl.SSLSocket
+    der_cert = sock.getpeercert(binary_form=True)
+    if not der_cert:
+        raise ConnectionError("Server did not provide a certificate")
+
+    actual = hashlib.sha256(der_cert).hexdigest().lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"C2 server certificate fingerprint mismatch!\n"
+            f"  Expected: {expected}\n"
+            f"  Actual:   {actual}\n"
+            "Refusing to connect — possible MitM attack or cert rotation.\n"
+            "If the cert was regenerated, update c2_tls_fingerprint in cluster.toml."
+        )
+
+    log.debug("TLS fingerprint verified for %s:%d (in-band)", host, port)
 
 
 # ---------------------------------------------------------------------------
@@ -24,8 +89,9 @@ log = logging.getLogger("xmrdp.c2client")
 # ---------------------------------------------------------------------------
 
 def _base_url(host: str, port: int) -> str:
-    """Build the base URL for the C2 API."""
-    return f"http://{host}:{port}"
+    """Build the base URL for the C2 API (http or https based on TLS config)."""
+    scheme = "https" if _tls_config["enabled"] else "http"
+    return f"{scheme}://{host}:{port}"
 
 
 def _make_request(url: str, token: str, data=None, method=None):
@@ -54,10 +120,7 @@ def _make_request(url: str, token: str, data=None, method=None):
     RuntimeError
         On HTTP error responses.
     """
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-
+    headers = {"Authorization": f"Bearer {token}"}
     body = None
     if data is not None:
         body = json.dumps(data).encode("utf-8")
@@ -66,25 +129,43 @@ def _make_request(url: str, token: str, data=None, method=None):
     if method is None:
         method = "POST" if body is not None else "GET"
 
-    req = Request(url, data=body, headers=headers, method=method)
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port
+    path = parsed.path
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    if _tls_config["enabled"]:
+        # Build CERT_NONE context — we verify fingerprint in-band below
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(host, port, timeout=15, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=15)
 
     try:
-        with urlopen(req, timeout=15) as resp:
-            raw = resp.read()
-            if raw:
-                return json.loads(raw.decode("utf-8"))
-            return {}
-    except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        log.error("C2 HTTP %d from %s: %s", exc.code, url, error_body)
-        raise RuntimeError(
-            f"C2 request failed (HTTP {exc.code}): {error_body}"
-        ) from exc
-    except URLError as exc:
-        log.error("Cannot reach C2 at %s: %s", url, exc.reason)
-        raise ConnectionError(
-            f"Cannot reach master at {url}: {exc.reason}"
-        ) from exc
+        conn.request(method, path, body=body, headers=headers)
+
+        # Verify fingerprint against the LIVE connection's peer cert (in-band — no TOCTOU)
+        if _tls_config["enabled"]:
+            _verify_peer_fingerprint(conn, host, port)
+
+        resp = conn.getresponse()
+        if resp.status >= 400:
+            error_body = resp.read().decode("utf-8", errors="replace")
+            log.error("C2 HTTP %d from %s: %s", resp.status, url, error_body)
+            raise RuntimeError(f"C2 request failed (HTTP {resp.status}): {error_body}")
+        raw = resp.read()
+        if raw:
+            return json.loads(raw.decode("utf-8"))
+        return {}
+    except (http.client.HTTPException, OSError) as exc:
+        log.error("Cannot reach C2 at %s: %s", url, exc)
+        raise ConnectionError(f"Cannot reach master at {url}: {exc}") from exc
+    finally:
+        conn.close()
 
 
 def _get_ram_mb() -> int:
@@ -171,30 +252,6 @@ def register(master_host: str, master_port: int, token: str, name: str) -> dict:
     return _make_request(url, token, data=payload)
 
 
-def fetch_config(master_host: str, master_port: int, token: str, name: str) -> dict:
-    """Fetch xmrig configuration from the master for this worker.
-
-    Parameters
-    ----------
-    master_host : str
-        Hostname or IP of the master node.
-    master_port : int
-        C2 API port on the master.
-    token : str
-        Bearer token for authentication.
-    name : str
-        Worker name (used to personalize the config).
-
-    Returns
-    -------
-    dict
-        xmrig configuration dictionary.
-    """
-    encoded_name = quote(name, safe="")
-    url = f"{_base_url(master_host, master_port)}/api/config/worker?name={encoded_name}"
-    return _make_request(url, token, method="GET")
-
-
 def report_status(
     master_host: str,
     master_port: int,
@@ -279,61 +336,6 @@ def run_heartbeat_loop(
         time.sleep(interval)
 
 
-def download_binary_from_master(
-    master_host: str,
-    master_port: int,
-    token: str,
-    name: str,
-    dest_path: str,
-) -> Path:
-    """Download a binary from the master's cache.
-
-    Parameters
-    ----------
-    master_host : str
-        Hostname or IP of the master node.
-    master_port : int
-        C2 API port on the master.
-    token : str
-        Bearer token for authentication.
-    name : str
-        Binary name (e.g. ``"xmrig"``).
-    dest_path : str
-        Local file path to write the downloaded binary.
-
-    Returns
-    -------
-    Path
-        The path to the downloaded file.
-    """
-    encoded = quote(name, safe="")
-    url = f"{_base_url(master_host, master_port)}/api/binaries/{encoded}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-    req = Request(url, headers=headers, method="GET")
-
-    try:
-        with urlopen(req, timeout=120) as resp:
-            dest = Path(dest_path)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            log.info("Downloaded binary %s to %s", name, dest)
-            return dest
-    except HTTPError as exc:
-        raise RuntimeError(
-            f"Failed to download binary '{name}' (HTTP {exc.code})"
-        ) from exc
-    except URLError as exc:
-        raise ConnectionError(
-            f"Cannot reach master at {url}: {exc.reason}"
-        ) from exc
-
 
 # ---------------------------------------------------------------------------
 # Local xmrig stats reader
@@ -352,7 +354,10 @@ def _read_local_xmrig_stats() -> dict:
     }
 
     try:
-        req = Request("http://127.0.0.1:8080/1/summary", method="GET")
+        headers = {}
+        if _xmrig_http_token:
+            headers["Authorization"] = f"Bearer {_xmrig_http_token}"
+        req = Request("http://127.0.0.1:8080/1/summary", headers=headers, method="GET")
         with urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             # xmrig summary has hashrate.total[] with 10s, 60s, 15m averages.

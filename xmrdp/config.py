@@ -7,6 +7,31 @@ from pathlib import Path
 from xmrdp.constants import CONFIG_FILENAME, PORTS
 from xmrdp.platforms import get_config_dir
 
+# Allowlist for host values: IPv4, bracketed IPv6, or a valid hostname (NF-03)
+_HOST_RE = re.compile(
+    r'^('
+    r'(?:\d{1,3}\.){3}\d{1,3}'   # IPv4
+    r'|\[[\da-fA-F:]+\]'          # bracketed IPv6
+    r'|[a-zA-Z0-9][a-zA-Z0-9._-]*'  # hostname
+    r')$'
+)
+
+_TOML_SENSITIVE_CHARS = str.maketrans({"\\": "\\\\", '"': '\\"'})
+
+# Allowlist for extra_args validated at config load time (mirrors config_generator._SAFE_ARG_RE)
+_SAFE_ARG_RE = re.compile(r'^--[a-zA-Z0-9][a-zA-Z0-9\-_.:/=,]*$')
+
+
+def _validate_extra_args(args, context):
+    """Raise ValueError if any extra_arg does not match the safe allowlist."""
+    for arg in args:
+        s = str(arg)
+        if not _SAFE_ARG_RE.match(s):
+            raise ValueError(
+                f"Unsafe extra_arg in [{context}] rejected: {s!r}. "
+                "Only --flag or --flag=value style arguments are allowed."
+            )
+
 
 def _load_toml(path):
     """Load a TOML file, using tomllib (3.11+) or tomli fallback."""
@@ -58,6 +83,14 @@ def _apply_defaults(config):
 
     config.setdefault("master", {})
     config["master"].setdefault("host", "127.0.0.1")
+
+    # Validate master.host to prevent SSRF via crafted config values (NF-03).
+    host = config["master"]["host"]
+    if not _HOST_RE.match(str(host)):
+        raise ValueError(
+            f"Invalid master.host value: {host!r}. "
+            "Use an IPv4 address, bracketed IPv6, or a valid hostname."
+        )
     config["master"].setdefault("api_port", PORTS["c2_api"])
     config["master"].setdefault("api_token", "")
 
@@ -71,8 +104,30 @@ def _apply_defaults(config):
 
     config["master"].setdefault("xmrig", {})
     config["master"]["xmrig"].setdefault("threads", 0)
+    config["master"]["xmrig"].setdefault("http_token", "")
+
+    # Validate extra_args at config load time so bad values are caught early (F-05).
+    _validate_extra_args(
+        config["master"]["monerod"].get("extra_args", []),
+        "master.monerod",
+    )
+    _validate_extra_args(
+        config["master"]["p2pool"].get("extra_args", []),
+        "master.p2pool",
+    )
 
     config.setdefault("workers", [])
+
+    # Validate worker host values to prevent SSRF via crafted config (NF-03).
+    for i, worker in enumerate(config["workers"]):
+        if not isinstance(worker, dict):
+            continue
+        w_host = worker.get("host", "")
+        if w_host and not _HOST_RE.match(str(w_host)):
+            raise ValueError(
+                f"Invalid host value in workers[{i}]: {w_host!r}. "
+                "Use an IPv4 address, bracketed IPv6, or a valid hostname."
+            )
 
     config.setdefault("binaries", {})
     config["binaries"].setdefault("monero_version", "latest")
@@ -81,6 +136,10 @@ def _apply_defaults(config):
 
     config.setdefault("security", {})
     config["security"].setdefault("verify_checksums", True)
+    config["security"].setdefault("tls_enabled", False)
+    config["security"].setdefault("c2_tls_cert", "")
+    config["security"].setdefault("c2_tls_key", "")
+    config["security"].setdefault("c2_tls_fingerprint", "")
 
 
 def validate_wallet(address):
@@ -104,6 +163,11 @@ def validate_wallet(address):
     return True, "Valid"
 
 
+def _toml_str(s: str) -> str:
+    """Escape a string for safe embedding in a TOML double-quoted value (NF-01)."""
+    return s.translate(_TOML_SENSITIVE_CHARS)
+
+
 def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
     """Generate a default cluster.toml content string."""
     workers = workers or []
@@ -111,10 +175,10 @@ def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
     lines = [
         '[cluster]',
         'name = "xmrdp-cluster"',
-        f'wallet = "{wallet}"',
+        f'wallet = "{_toml_str(wallet)}"',
         '',
         '[master]',
-        f'host = "{master_host}"',
+        f'host = "{_toml_str(master_host)}"',
         f'api_port = {PORTS["c2_api"]}',
         'api_token = ""  # Auto-generated on first setup',
         '',
@@ -128,6 +192,7 @@ def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
         '',
         '[master.xmrig]',
         'threads = 0  # 0 = auto-detect',
+        'http_token = ""  # Auto-generated on first setup',
         '',
     ]
 
@@ -139,8 +204,8 @@ def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
             name = f"worker-{i}"
             host = w
         lines.append("[[workers]]")
-        lines.append(f'name = "{name}"')
-        lines.append(f'host = "{host}"')
+        lines.append(f'name = "{_toml_str(name)}"')
+        lines.append(f'host = "{_toml_str(host)}"')
         lines.append("")
 
     lines.extend([
@@ -151,6 +216,10 @@ def generate_default_config(wallet="", master_host="127.0.0.1", workers=None):
         '',
         '[security]',
         'verify_checksums = true',
+        'tls_enabled = false',
+        'c2_tls_cert = ""',
+        'c2_tls_key = ""',
+        'c2_tls_fingerprint = ""',
         '',
     ])
 

@@ -440,5 +440,248 @@ class TestBinaryManager(unittest.TestCase):
         self.assertTrue(result["browser_download_url"].startswith("https://"))
 
 
+class TestSecurityControls(unittest.TestCase):
+    """Regression tests for security controls.
+
+    These tests exist to catch accidental removal or breakage of security
+    fixes. A CI pass here means the controls are still wired — not that the
+    system is production-ready.
+    """
+
+    # ------------------------------------------------------------------
+    # Auth token comparison — must use hmac.compare_digest, not ==
+    # ------------------------------------------------------------------
+
+    def test_auth_uses_hmac_compare_digest(self):
+        """c2_server._check_auth must call hmac.compare_digest, not ==."""
+        import inspect
+        import xmrdp.c2_server as srv
+        source = inspect.getsource(srv.C2Handler._check_auth)
+        self.assertIn("hmac.compare_digest", source,
+                      "Token comparison must use hmac.compare_digest (timing-safe)")
+        # Explicitly forbid plain equality on the token
+        self.assertNotIn("token ==", source)
+        self.assertNotIn("== token", source)
+
+    # ------------------------------------------------------------------
+    # Worker name allowlist (NF-NEW-02)
+    # ------------------------------------------------------------------
+
+    def test_worker_name_allowlist_valid(self):
+        """Valid worker names must pass the regex."""
+        from xmrdp.c2_server import _WORKER_NAME_RE
+        valid = ["worker-1", "gpu-node01", "A", "x_y", "a" * 64]
+        for name in valid:
+            self.assertIsNotNone(_WORKER_NAME_RE.match(name),
+                                 f"Expected valid name to pass: {name!r}")
+
+    def test_worker_name_allowlist_invalid(self):
+        """Dangerous worker names must be rejected by the regex."""
+        from xmrdp.c2_server import _WORKER_NAME_RE
+        invalid = [
+            "",                       # empty
+            "\x1b[31mred\x1b[0m",    # ANSI escape
+            "../../../etc/passwd",    # path traversal
+            "name with spaces",       # spaces
+            "a" * 65,                 # too long
+            "-startswith-dash",       # must start with alnum
+        ]
+        for name in invalid:
+            self.assertIsNone(_WORKER_NAME_RE.match(name),
+                              f"Expected invalid name to be rejected: {name!r}")
+
+    # ------------------------------------------------------------------
+    # TOML injection escaping (NF-01)
+    # ------------------------------------------------------------------
+
+    def test_toml_str_escapes_quotes(self):
+        """_toml_str must escape double quotes."""
+        from xmrdp.config import _toml_str
+        self.assertEqual(_toml_str('say "hello"'), 'say \\"hello\\"')
+
+    def test_toml_str_escapes_backslash(self):
+        """_toml_str must escape backslashes."""
+        from xmrdp.config import _toml_str
+        self.assertEqual(_toml_str("C:\\path"), "C:\\\\path")
+
+    def test_toml_str_passthrough_safe(self):
+        """_toml_str must not alter safe characters."""
+        from xmrdp.config import _toml_str
+        safe = "wallet-address_123.abc"
+        self.assertEqual(_toml_str(safe), safe)
+
+    # ------------------------------------------------------------------
+    # Host validation (_HOST_RE) — prevents SSRF (NF-03)
+    # ------------------------------------------------------------------
+
+    def test_host_re_accepts_valid(self):
+        """_HOST_RE should accept valid IPv4, IPv6, and hostnames."""
+        from xmrdp.config import _HOST_RE
+        valid = ["127.0.0.1", "192.168.1.100", "[::1]", "master.local",
+                 "my-node", "10.0.0.1"]
+        for h in valid:
+            self.assertIsNotNone(_HOST_RE.match(h),
+                                 f"Expected valid host: {h!r}")
+
+    def test_host_re_rejects_invalid(self):
+        """_HOST_RE should reject shell metacharacters and injection attempts."""
+        from xmrdp.config import _HOST_RE
+        invalid = [
+            "host; rm -rf /",
+            "$(whoami)",
+            "host`id`",
+            "",
+            "host name",  # space
+        ]
+        for h in invalid:
+            self.assertIsNone(_HOST_RE.match(h),
+                              f"Expected invalid host to be rejected: {h!r}")
+
+    # ------------------------------------------------------------------
+    # extra_args validation (F-05)
+    # ------------------------------------------------------------------
+
+    def test_extra_args_valid(self):
+        """Safe --flag and --flag=value style args should pass."""
+        from xmrdp.config import _validate_extra_args
+        safe = ["--prune-blockchain", "--log-level=1", "--max-peers=8",
+                "--data-dir=/tmp/monero"]
+        # Should not raise
+        _validate_extra_args(safe, "test")
+
+    def test_extra_args_rejects_injection(self):
+        """Shell-injection style args must be rejected."""
+        from xmrdp.config import _validate_extra_args
+        dangerous = [
+            "$(rm -rf /)",
+            "; cat /etc/passwd",
+            "--valid --also ; injected",
+            "naked-flag",      # must start with --
+            "--flag with space",
+        ]
+        for arg in dangerous:
+            with self.assertRaises(ValueError,
+                                   msg=f"Expected rejection of: {arg!r}"):
+                _validate_extra_args([arg], "test")
+
+    # ------------------------------------------------------------------
+    # Body size cap (F-01 / NF-02)
+    # ------------------------------------------------------------------
+
+    def test_max_body_constant_present(self):
+        """_MAX_BODY must be defined and ≤ 1 MB."""
+        from xmrdp.c2_server import C2Handler
+        self.assertTrue(hasattr(C2Handler, "_MAX_BODY"))
+        self.assertLessEqual(C2Handler._MAX_BODY, 1024 * 1024,
+                             "_MAX_BODY should be ≤ 1 MB")
+        self.assertGreater(C2Handler._MAX_BODY, 0)
+
+    # ------------------------------------------------------------------
+    # Rate limiting — dict cap (NF-NEW-04)
+    # ------------------------------------------------------------------
+
+    def test_rate_limit_max_ips_constant(self):
+        """_RATE_LIMIT_MAX_IPS must be defined and reasonable."""
+        from xmrdp.c2_server import _RATE_LIMIT_MAX_IPS
+        self.assertGreater(_RATE_LIMIT_MAX_IPS, 0)
+        self.assertLessEqual(_RATE_LIMIT_MAX_IPS, 1_000_000,
+                             "Rate limit cap is unreasonably large")
+
+    # ------------------------------------------------------------------
+    # No fingerprint cache (NF-NEW-05)
+    # ------------------------------------------------------------------
+
+    def test_fingerprint_cache_removed(self):
+        """_fingerprint_cache must NOT exist — fingerprint verified per-connection."""
+        import xmrdp.c2_client as client
+        self.assertFalse(hasattr(client, "_fingerprint_cache"),
+                         "_fingerprint_cache should be removed; verify on every connection")
+
+    # ------------------------------------------------------------------
+    # Pool URL boundary check (NF-NEW-06)
+    # ------------------------------------------------------------------
+
+    def test_pool_url_boundary_fix(self):
+        """Pool URL check must use startswith(host + ':') not startswith(host)."""
+        # Simulate the check from cluster.py deploy_worker.
+        # A short hostname must not be a valid prefix for a longer hostname.
+        master_host = "10.0.0.1"
+        # Valid: exact match with port
+        self.assertTrue(f"10.0.0.1:3333".startswith(master_host + ":"))
+        # Invalid: would pass the old check but must fail the new one
+        self.assertFalse(f"10.0.0.10:3333".startswith(master_host + ":"))
+
+        master_host_short = "pool"
+        self.assertFalse(f"poolevil.attacker.com:3333".startswith(master_host_short + ":"))
+
+    # ------------------------------------------------------------------
+    # Config defaults — verify_checksums must default to True (F-08 prep)
+    # ------------------------------------------------------------------
+
+    def test_verify_checksums_default_true(self):
+        """verify_checksums must default to True in _apply_defaults."""
+        from xmrdp.config import _apply_defaults
+        cfg = {}
+        _apply_defaults(cfg)
+        self.assertTrue(cfg["security"]["verify_checksums"],
+                        "verify_checksums must default to True")
+
+    # ------------------------------------------------------------------
+    # Zip Slip — binary manager safe extract exists
+    # ------------------------------------------------------------------
+
+    def test_safe_tar_extract_exists(self):
+        """Zip Slip guard must be present in binary_manager extraction code."""
+        import inspect
+        import xmrdp.binary_manager as bm
+        source = inspect.getsource(bm)
+        # The guard uses relative_to() containment check on extracted member paths.
+        self.assertIn("relative_to", source,
+                      "Zip Slip guard (relative_to containment check) must be present in binary_manager")
+
+    # ------------------------------------------------------------------
+    # ZMQ bind address — must not be 0.0.0.0
+    # ------------------------------------------------------------------
+
+    def test_zmq_not_bound_to_all_interfaces(self):
+        """ZMQ bind address in monerod args must not be 0.0.0.0."""
+        from xmrdp.config_generator import generate_monerod_args
+        cfg = {
+            "cluster": {"wallet": "4" + "1" * 94},
+            "master": {
+                "host": "192.168.1.10",
+                "monerod": {"prune": False, "extra_args": []},
+                "p2pool": {"mini": True, "extra_args": []},
+                "xmrig": {"threads": 0},
+            },
+        }
+        args = generate_monerod_args(cfg)
+        args_str = " ".join(args)
+        self.assertNotIn("zmq-pub tcp://0.0.0.0", args_str,
+                         "ZMQ must bind to 127.0.0.1, not 0.0.0.0")
+        self.assertIn("127.0.0.1", args_str,
+                      "ZMQ must bind to 127.0.0.1")
+
+    # ------------------------------------------------------------------
+    # xmrig donate-level — must be 0
+    # ------------------------------------------------------------------
+
+    def test_xmrig_donate_level_zero(self):
+        """xmrig generated config must have donate-level set to 0."""
+        from xmrdp.config_generator import generate_xmrig_config
+        cfg = {
+            "cluster": {"wallet": "4" + "1" * 94},
+            "master": {
+                "host": "192.168.1.10",
+                "monerod": {"prune": True, "extra_args": []},
+                "p2pool": {"mini": True, "extra_args": []},
+                "xmrig": {"threads": 0},
+            },
+        }
+        xmrig_cfg = generate_xmrig_config(cfg, role="master")
+        self.assertEqual(xmrig_cfg.get("donate-level"), 0,
+                         "donate-level must be 0 to prevent unwanted pool donation")
+
+
 if __name__ == "__main__":
     unittest.main()

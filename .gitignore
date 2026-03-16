@@ -1,11 +1,40 @@
 .git
 .claude
 
+# Python bytecode
 __pycache__/
 *.py[cod]
+*.pyo
+.pytest_cache/
+
+# Distribution / packaging
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
 
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Secrets and credentials — never commit these
+cluster.toml
+c2_server.crt
+c2_server.key
+
+# Runtime data directories
+xmrdp_data/
+xmrdp_config/
+
+# Generated test harness
+test_c2_api.py
+
+# Internal version tracking
 .versions.json
+
+# Model Strategy
+strategy/
