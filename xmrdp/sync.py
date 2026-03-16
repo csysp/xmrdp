@@ -12,10 +12,14 @@ accepted or stored by xmrdp itself.
 
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+
+_SSH_USER_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
 
 from xmrdp.constants import PORTS
 
@@ -71,6 +75,13 @@ def cmd_sync(args) -> None:
                 sys.exit(1)
 
     ssh_user = (args.ssh_user or "").strip()
+    if ssh_user and not _SSH_USER_RE.match(ssh_user):
+        print(
+            f"Error: invalid --ssh-user value {ssh_user!r}. "
+            "Only alphanumeric characters, dots, hyphens, and underscores are allowed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     dry_run = args.dry_run
     restart = args.restart
 
@@ -104,7 +115,7 @@ def cmd_sync(args) -> None:
 
             # Ensure remote config directory exists.
             result = subprocess.run(
-                ["ssh", remote, f"mkdir -p {_REMOTE_CONFIG_DIR}"],
+                ["ssh", remote, f"mkdir -p {shlex.quote(_REMOTE_CONFIG_DIR)}"],
                 capture_output=True, timeout=30,
             )
             if result.returncode != 0:
@@ -126,7 +137,7 @@ def cmd_sync(args) -> None:
 
             # Restrict permissions on the remote config file.
             result = subprocess.run(
-                ["ssh", remote, f"chmod 600 {_REMOTE_CONFIG_PATH}"],
+                ["ssh", remote, f"chmod 600 {shlex.quote(_REMOTE_CONFIG_PATH)}"],
                 capture_output=True, timeout=30,
             )
             if result.returncode != 0:

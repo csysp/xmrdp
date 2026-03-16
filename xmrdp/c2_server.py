@@ -251,6 +251,9 @@ class C2Handler(BaseHTTPRequestHandler):
         if not name:
             self._send_json({"error": "Missing required field: name"}, 400)
             return
+        if not _WORKER_NAME_RE.match(str(name)):
+            self._send_json({"error": "Invalid worker name"}, 400)
+            return
 
         platform = body.get("platform", "unknown")
         cpus = body.get("cpus", 0)
@@ -287,6 +290,9 @@ class C2Handler(BaseHTTPRequestHandler):
         name = body.get("name")
         if not name:
             self._send_json({"error": "Missing required field: name"}, 400)
+            return
+        if not _WORKER_NAME_RE.match(str(name)):
+            self._send_json({"error": "Invalid worker name"}, 400)
             return
 
         request_ip = self.client_address[0]
