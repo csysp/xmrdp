@@ -248,8 +248,13 @@ class TestC2Register(_C2Base):
     def test_oversized_body_returns_400(self):
         """Body larger than 64 KB must be rejected."""
         big = b'{"name":"x","pad":"' + b"A" * 70_000 + b'"}'
-        status, _, _ = self._req("POST", "/api/register", raw_body=big)
-        self.assertEqual(status, 400)
+        try:
+            status, _, _ = self._req("POST", "/api/register", raw_body=big)
+            self.assertEqual(status, 400)
+        except (ConnectionResetError, ConnectionAbortedError):
+            # Windows: server closes the connection while the client is still
+            # sending the oversized body, raising WinError 10053/10054.
+            pass
 
     def test_reregistration_updates_existing_worker(self):
         """Registering the same name twice should update fields."""
@@ -428,8 +433,13 @@ class TestC2BodyGuards(_C2Base):
         """A body over 64 KB must return 400."""
         oversized = json.dumps({"name": "big", "pad": "A" * 70_000}).encode()
         self.assertGreater(len(oversized), 65536)
-        status, _, _ = self._req("POST", "/api/register", raw_body=oversized)
-        self.assertEqual(status, 400)
+        try:
+            status, _, _ = self._req("POST", "/api/register", raw_body=oversized)
+            self.assertEqual(status, 400)
+        except (ConnectionResetError, ConnectionAbortedError):
+            # Windows: server closes the connection while the client is still
+            # sending the oversized body, raising WinError 10053/10054.
+            pass
 
 
 # ===========================================================================
