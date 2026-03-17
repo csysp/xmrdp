@@ -73,6 +73,7 @@ def load_config(path=None):
 
     config = _load_toml(p)
     _apply_defaults(config)
+    _resolve_tokens(config, p.parent)
     return config
 
 
@@ -152,6 +153,44 @@ def _apply_defaults(config):
     config["security"].setdefault("c2_tls_cert", "")
     config["security"].setdefault("c2_tls_key", "")
     config["security"].setdefault("c2_tls_fingerprint", "")
+
+
+def _resolve_tokens(config, config_dir):
+    """Resolve api_token_id / http_token_id → real secrets from tokens.json.
+
+    When the wizard stores secrets separately (post-CodeQL fix), the TOML
+    contains *_id keys rather than the raw secrets.  This function looks up
+    the real values in tokens.json and injects them into the config dict so
+    the rest of the application can use them as before.
+    """
+    import json
+
+    token_store_path = Path(config_dir) / "tokens.json"
+    if not token_store_path.exists():
+        return
+
+    try:
+        data = json.loads(token_store_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    api_tokens = data.get("api_tokens", {})
+    xmrig_http_tokens = data.get("xmrig_http_tokens", {})
+
+    master = config.setdefault("master", {})
+
+    # Resolve api_token if not already populated
+    if not master.get("api_token"):
+        token_id = master.get("api_token_id", "")
+        if token_id and token_id in api_tokens:
+            master["api_token"] = api_tokens[token_id]
+
+    # Resolve xmrig http_token if not already populated
+    xmrig = master.setdefault("xmrig", {})
+    if not xmrig.get("http_token"):
+        token_id = xmrig.get("http_token_id", "") or master.get("xmrig_http_token_id", "")
+        if token_id and token_id in xmrig_http_tokens:
+            xmrig["http_token"] = xmrig_http_tokens[token_id]
 
 
 def validate_wallet(address):
