@@ -352,7 +352,7 @@ def _print_summary(wallet, role, master_host, workers, config_path, api_token,
     for w in workers:
         print(f"                   {w['name']} @ {w['host']}")
     print(f"  Config file:   {config_path}")
-    print(f"  API token:     {api_token[:8]}...{api_token[-8:]}")
+    print("  API token:     [generated and stored in config]")
     print(f"  xmrig HTTP token: {xmrig_http_token[:8]}..." if xmrig_http_token else "  xmrig HTTP token: not set")
     if tls_enabled:
         print(f"  C2 TLS:        enabled")
