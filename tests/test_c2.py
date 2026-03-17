@@ -334,7 +334,7 @@ class TestC2Heartbeat(_C2Base):
         try:
             status, _, _ = self._req("POST", "/api/status", raw_body=big)
             self.assertEqual(status, 400)
-        except ConnectionResetError:
+        except (ConnectionResetError, ConnectionAbortedError):
             # Windows: server closes the connection instead of sending HTTP 400
             pass
 
