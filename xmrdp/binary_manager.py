@@ -24,6 +24,9 @@ from xmrdp.constants import (
     CHECKSUM_PATTERNS,
     GITHUB_API,
     GITHUB_REPOS,
+    MONERO_DOWNLOAD_BASE,
+    MONERO_HASHES_URL,
+    MONERO_ASSET_NAMES,
 )
 from xmrdp.platforms import detect_platform, get_binary_dir, make_executable
 
@@ -427,6 +430,45 @@ def get_binary_path(software):
     return None
 
 
+def _build_monero_asset(tag, system, machine):
+    """Construct a synthetic asset dict for Monero from downloads.getmonero.org.
+
+    Monero does not attach binary assets to GitHub releases; binaries are
+    hosted at ``downloads.getmonero.org/cli/`` instead.  This returns a dict
+    shaped like a GitHub release asset so the rest of the download pipeline
+    works unchanged.
+
+    Returns ``None`` if the platform is not supported.
+    """
+    template = MONERO_ASSET_NAMES.get((system, machine))
+    if template is None:
+        return None
+    version = tag.lstrip("v")
+    filename = template.format(version=version)
+    return {
+        "name": filename,
+        "browser_download_url": f"{MONERO_DOWNLOAD_BASE}/{filename}",
+        "size": 0,
+    }
+
+
+def _fetch_monero_checksums():
+    """Fetch and parse Monero SHA-256 checksums from www.getmonero.org."""
+    resp = _request(MONERO_HASHES_URL)
+    text = resp.read().decode("utf-8", errors="replace")
+    checksums = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r"[\s*]+", line, maxsplit=1)
+        if len(parts) == 2:
+            maybe_hash, maybe_name = parts
+            if re.fullmatch(r"[0-9a-fA-F]{64}", maybe_hash):
+                checksums[maybe_name] = maybe_hash.lower()
+    return checksums
+
+
 def ensure_binaries(config, force=False):
     """Download, verify, and cache all required binaries.
 
@@ -481,8 +523,13 @@ def ensure_binaries(config, force=False):
         tag = release["tag_name"]
         assets = release["assets"]
 
-        # Match the platform asset
-        asset = match_asset(assets, software, system, machine)
+        # Match the platform asset.
+        # Monero hosts binaries on its own CDN rather than attaching them to
+        # GitHub releases, so the assets list from the API is always empty.
+        if software == "monero" and not assets:
+            asset = _build_monero_asset(tag, system, machine)
+        else:
+            asset = match_asset(assets, software, system, machine)
         if asset is None:
             raise RuntimeError(
                 f"No compatible {software} release asset found for "
@@ -504,7 +551,10 @@ def ensure_binaries(config, force=False):
 
         # Checksum verification — wired to security.verify_checksums (F-08)
         verify = config.get("security", {}).get("verify_checksums", True)
-        checksums = get_release_checksums(assets, software)
+        if software == "monero" and not assets:
+            checksums = _fetch_monero_checksums()
+        else:
+            checksums = get_release_checksums(assets, software)
         if checksums:
             expected = checksums.get(asset["name"])
             if expected:

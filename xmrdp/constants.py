@@ -65,6 +65,20 @@ BINARY_NAMES = {
     },
 }
 
+# Monero binaries are hosted externally, not attached to GitHub releases.
+MONERO_DOWNLOAD_BASE = "https://downloads.getmonero.org/cli"
+MONERO_HASHES_URL = "https://www.getmonero.org/downloads/hashes.txt"
+
+# Concrete filename templates for each supported Monero platform.
+# Keys match (system, machine) from detect_platform(); {version} is filled at runtime.
+MONERO_ASSET_NAMES = {
+    ("linux",   "x86_64"):  "monero-linux-x64-v{version}.tar.bz2",
+    ("linux",   "aarch64"): "monero-linux-armv8-v{version}.tar.bz2",
+    ("windows", "x86_64"):  "monero-win-x64-v{version}.zip",
+    ("darwin",  "x86_64"):  "monero-mac-x64-v{version}.tar.bz2",
+    ("darwin",  "aarch64"): "monero-mac-armv8-v{version}.tar.bz2",
+}
+
 # SHA256 checksum file patterns in releases
 CHECKSUM_PATTERNS = {
     "monero": r"hashes\.txt$",

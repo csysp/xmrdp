@@ -440,6 +440,52 @@ class TestBinaryManager(unittest.TestCase):
         self.assertTrue(result["browser_download_url"].startswith("https://"))
 
 
+class TestMoneroCDNAsset(unittest.TestCase):
+    """Tests for _build_monero_asset — Monero uses getmonero.org CDN, not GitHub assets."""
+
+    def setUp(self):
+        from xmrdp.binary_manager import _build_monero_asset
+        self._build = _build_monero_asset
+
+    def test_windows_x86_64(self):
+        asset = self._build("v0.18.4.6", "windows", "x86_64")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["name"], "monero-win-x64-v0.18.4.6.zip")
+        self.assertIn("downloads.getmonero.org/cli", asset["browser_download_url"])
+        self.assertTrue(asset["browser_download_url"].startswith("https://"))
+
+    def test_linux_x86_64(self):
+        asset = self._build("v0.18.4.6", "linux", "x86_64")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["name"], "monero-linux-x64-v0.18.4.6.tar.bz2")
+
+    def test_linux_aarch64(self):
+        asset = self._build("v0.18.4.6", "linux", "aarch64")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["name"], "monero-linux-armv8-v0.18.4.6.tar.bz2")
+
+    def test_darwin_x86_64(self):
+        asset = self._build("v0.18.4.6", "darwin", "x86_64")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["name"], "monero-mac-x64-v0.18.4.6.tar.bz2")
+
+    def test_darwin_aarch64(self):
+        asset = self._build("v0.18.4.6", "darwin", "aarch64")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["name"], "monero-mac-armv8-v0.18.4.6.tar.bz2")
+
+    def test_unsupported_platform_returns_none(self):
+        asset = self._build("v0.18.4.6", "freebsd", "x86_64")
+        self.assertIsNone(asset)
+
+    def test_tag_without_v_prefix(self):
+        # Tags with or without a leading "v" should produce the same filename.
+        asset_with = self._build("v0.18.4.6", "linux", "x86_64")
+        asset_without = self._build("0.18.4.6", "linux", "x86_64")
+        self.assertIsNotNone(asset_without)
+        self.assertEqual(asset_with["name"], asset_without["name"])
+
+
 class TestSecurityControls(unittest.TestCase):
     """Regression tests for security controls.
 
