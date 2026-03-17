@@ -69,7 +69,9 @@ def run_setup(args):
 
         # --- API token ---
         api_token = secrets.token_hex(32)
+        api_token_id = secrets.token_hex(8)
         xmrig_http_token = secrets.token_hex(16)
+        xmrig_http_token_id = secrets.token_hex(8)
 
         # --- TLS certificate (master only) ---
         config_dir = get_config_dir()
@@ -77,6 +79,7 @@ def run_setup(args):
         tls_fingerprint = ""
         tls_cert_path = config_dir / C2_TLS_CERT_FILE
         tls_key_path = config_dir / C2_TLS_KEY_FILE
+        token_store_path = config_dir / "tokens.json"
 
         if role == "master":
             print()
@@ -96,14 +99,14 @@ def run_setup(args):
             workers=workers,
         )
 
-        # Inject generated secrets into config text.
+        # Inject generated token IDs into config text (secrets stored separately).
         config_content = config_content.replace(
             'api_token = ""  # Auto-generated on first setup',
-            f'api_token = "{api_token}"',
+            f'api_token_id = "{api_token_id}"',
         )
         config_content = config_content.replace(
             'http_token = ""  # Auto-generated on first setup',
-            f'http_token = "{xmrig_http_token}"',
+            f'http_token_id = "{xmrig_http_token_id}"',
         )
         if tls_enabled:
             config_content = config_content.replace(
@@ -119,6 +122,48 @@ def run_setup(args):
                 'c2_tls_fingerprint = ""',
                 f'c2_tls_fingerprint = "{tls_fingerprint}"',
             )
+
+        # --- Persist tokens in a separate, restricted token store ---
+        token_store = {
+            "api_tokens": {api_token_id: api_token},
+            "xmrig_http_tokens": {xmrig_http_token_id: xmrig_http_token},
+        }
+        if token_store_path.exists():
+            try:
+                existing = token_store_path.read_text(encoding="utf-8")
+                import json as _json  # local import to avoid top-level clashes if any
+                data = _json.loads(existing) if existing.strip() else {}
+            except Exception:
+                data = {}
+            api_tokens = data.get("api_tokens", {})
+            api_tokens.update(token_store["api_tokens"])
+            xmrig_http_tokens = data.get("xmrig_http_tokens", {})
+            xmrig_http_tokens.update(token_store["xmrig_http_tokens"])
+            data["api_tokens"] = api_tokens
+            data["xmrig_http_tokens"] = xmrig_http_tokens
+        else:
+            data = token_store
+
+        if sys.platform != "win32":
+            # Create token store with mode 0o600 atomically.
+            ts_fd = os.open(
+                token_store_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            try:
+                with os.fdopen(ts_fd, "w", encoding="utf-8") as ts_fh:
+                    import json as _json
+                    _json.dump(data, ts_fh)
+            except BaseException:
+                try:
+                    os.close(ts_fd)
+                except OSError:
+                    pass
+                raise
+        else:
+            import json as _json
+            token_store_path.write_text(_json.dumps(data), encoding="utf-8")
 
         config_path = config_dir / CONFIG_FILENAME
         if sys.platform != "win32":
