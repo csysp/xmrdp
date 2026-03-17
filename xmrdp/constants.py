@@ -82,7 +82,7 @@ MONERO_ASSET_NAMES = {
 # SHA256 checksum file patterns in releases
 CHECKSUM_PATTERNS = {
     "monero": r"hashes\.txt$",
-    "p2pool": r"sha256sums\.txt$",
+    "p2pool": r"sha256sums\.txt(\.asc)?$",
     "xmrig": r"SHA256SUMS$",
 }
 
